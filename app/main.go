@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 )
 
 func main() {
@@ -46,12 +47,31 @@ func main() {
 		// 1234 - это число, наверно подефолту на 32 бита, нам нужно его записать в 16 бит, 2 байта, пишем сначала один байт (>>8), затем второй (& 0xFF - отбрасываем лишние байты)
 		//  потому что 1234 - это 16 бит и ты делишь на 256 ( сдвиг на 8 битов)
 
-		header := setHeader(HeaderOptions{uint16(1234), true, byte(0), false, false, false, false, byte(0), byte(0), uint16(0), uint16(0), uint16(0), uint16(0)})
-		_, err = udpConn.WriteToUDP(header, source)
+		// response packet
+		// quesitons section
+		questionSection, qdcount := setQuestionSection(questionSectionOptions{"codecrafters.io", A, IN})
+
+		//header
+		header := setHeader(HeaderOptions{uint16(1234), true, byte(0), false, false, false, false, byte(0), byte(0), uint16(qdcount), uint16(0), uint16(0), uint16(0)})
+
+		response := append(header, questionSection...)
+
+		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
 			fmt.Println("Failed to send response:", err)
 		}
 	}
+}
+
+type Packet struct {
+	header          []byte
+	questionSection []byte
+}
+
+type questionSectionOptions struct {
+	name  string
+	qType qType
+	class qClass
 }
 
 type HeaderOptions struct {
@@ -76,13 +96,15 @@ func setHeader(headerOptions HeaderOptions) []byte {
 
 	// masks
 	qrMask := byte(1 << 7)
-	opCodeMask := byte(1<<6) | byte(1<<5) | byte(1<<4) | byte(1<<3)
+	// TODO: opCodeMask := byte(0b01111000)
+	opCodeMask := (byte(1<<6) | byte(1<<5) | byte(1<<4) | byte(1<<3)) & (opCode << 3)
 	aaMask := byte(1 << 2)
 	tcMask := byte(1 << 1)
 	rdMask := byte(1)
 
 	raMask := byte(1 << 7)
-	zMask := byte(1<<6) | byte(1<<5) | byte(1<<4)
+	// TODO:  opCodeMask := byte(0b01110000)
+	zMask := (byte(1<<6) | byte(1<<5) | byte(1<<4)) & (z << 3)
 	rcodeMask := byte(1<<3) | byte(1<<2) | byte(1<<1) | byte(1)
 
 	// allocate array of 12 bytes
@@ -95,23 +117,23 @@ func setHeader(headerOptions HeaderOptions) []byte {
 	qrOpCodeAaTcRd := byte(0)
 
 	if qr {
-		qrOpCodeAaTcRd = qrOpCodeAaTcRd | qrMask //128 // (1 << 7) == 128
+		qrOpCodeAaTcRd |= qrMask //128 // (1 << 7) == 128
 	}
 
 	if opCode > 0 {
-		qrOpCodeAaTcRd = qrOpCodeAaTcRd | (opCodeMask & (opCode << 3)) //(15 << 3) == 120
+		qrOpCodeAaTcRd |= opCodeMask //(15 << 3) == 120
 	}
 
 	if aa {
-		qrOpCodeAaTcRd = qrOpCodeAaTcRd | aaMask
+		qrOpCodeAaTcRd |= aaMask
 	}
 
 	if tc {
-		qrOpCodeAaTcRd = qrOpCodeAaTcRd | tcMask
+		qrOpCodeAaTcRd |= tcMask
 	}
 
 	if rd {
-		qrOpCodeAaTcRd = qrOpCodeAaTcRd | rdMask
+		qrOpCodeAaTcRd |= rdMask
 	}
 
 	// write 5 options: qr, opCode, aa, tc, rd into header
@@ -121,15 +143,15 @@ func setHeader(headerOptions HeaderOptions) []byte {
 	raZRcode := byte(0)
 
 	if ra {
-		raZRcode = raZRcode | raMask
+		raZRcode |= raMask
 	}
 
 	if z > 0 {
-		raZRcode = raZRcode | (zMask & (z << 3))
+		raZRcode |= zMask
 	}
 
 	if rcode > 0 {
-		raZRcode = raZRcode | (rcodeMask & rcode)
+		raZRcode |= rcodeMask & rcode
 	}
 
 	// write 5 options: qr, opCode, aa, tc, rd into header
@@ -142,3 +164,80 @@ func setHeader(headerOptions HeaderOptions) []byte {
 	binary.BigEndian.PutUint16(header[10:], arcount)
 	return header
 }
+
+// TODO: возможно, нужно принимать массив строк. тогда и оценивать QDCount как больше единицы
+// сейчас принимается один name === entry для парсинга, поэтому увеличивает QDCount на единицу
+func setQuestionSection(questionSectionOptions questionSectionOptions) ([]byte, int) {
+
+	// deconstruct
+	name, qType, class := questionSectionOptions.name, questionSectionOptions.qType, questionSectionOptions.class
+
+	// as we deal with string, not string[] - the number of entries is always 1
+	numberOfEntries := 1
+	// name := 'codecrafters.io'
+	// \x00
+
+	nameSplit := strings.Split(name, ".")
+
+	// null terminator
+	nullByte := byte('\x00')
+
+	// allocate array of byte for response & offset
+	var response []byte
+	//offset := 0
+
+	for _, value := range nameSplit {
+		lengthInBytes := len(value)
+		response = append(response, byte(lengthInBytes))
+		//offset += 1
+		response = append(response, []byte(value)...)
+		//offset += lengthInBytes - 1
+	}
+
+	// add nullByte terminator to the end of entry
+	response = append(response, nullByte)
+	//offset += 1
+
+	// add type info
+	QtypeArray := make([]byte, 2)
+	binary.BigEndian.PutUint16(QtypeArray, uint16(qType))
+	response = append(response, QtypeArray...)
+
+	// add class info
+	classArray := make([]byte, 2)
+	binary.BigEndian.PutUint16(classArray, uint16(class))
+	response = append(response, classArray...)
+
+	return response, numberOfEntries
+
+}
+
+type qType uint16
+
+const (
+	A qType = iota + 1
+	NS
+	MD
+	MF
+	CNAME
+	SOA
+	MB
+	MG
+	MR
+	NULL
+	WKS
+	PTR
+	HINFO
+	MINFO
+	MX
+	TXT
+)
+
+type qClass uint16
+
+const (
+	IN qClass = iota + 1
+	CS
+	CH
+	HS
+)
