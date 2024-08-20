@@ -41,42 +41,14 @@ func main() {
 			break
 		}
 
-		requestInBytes := (buf[:size])
-		receivedData := string(buf[:size])
+		receivedData := buf[:size]
 
-		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
-
-		id := requestInBytes[:2]
-
-		qrOpCodeAaTcRd := requestInBytes[2]
-		qrMask := byte(1 << 7)
-		// TODO: opCodeMask := byte(0b01111000)
-		opCodeMask := byte(1<<6) | byte(1<<5) | byte(1<<4) | byte(1<<3)
-		aaMask := byte(1 << 2)
-		tcMask := byte(1 << 1)
-		rdMask := byte(1)
-
-		qrOpCodeAaTcRd |= qrMask
-		qrOpCodeAaTcRd |= opCodeMask
-		qrOpCodeAaTcRd |= aaMask
-		qrOpCodeAaTcRd |= tcMask
-		qrOpCodeAaTcRd |= rdMask
-
-		opCode := qrOpCodeAaTcRd | byte(0b01111000)
-		var rCode byte
-		if opCode == 0 {
-			rCode = byte(0)
-		} else {
-			rCode = byte(4)
-		}
-
-		rd := qrOpCodeAaTcRd | byte(0b00000001)
 		//  response[0]=1234 >> 8; response[1]= 1234 & 0xFF;
 		// 1234 - это число, наверно подефолту на 32 бита, нам нужно его записать в 16 бит, 2 байта, пишем сначала один байт (>>8), затем второй (& 0xFF - отбрасываем лишние байты)
 		//  потому что 1234 - это 16 бит и ты делишь на 256 ( сдвиг на 8 битов)
 
 		// response packet
-		// quesitons section
+		// question section
 		questionSection, qdcount := setQuestionSection(questionSectionOptions{"codecrafters.io", A, IN})
 
 		// answer section
@@ -84,10 +56,20 @@ func main() {
 		answerSection, ancount := setAnswerSection(questionSection)
 
 		//header
-		header := setHeader(HeaderOptions{binary.BigEndian.Uint16(id), true, opCode, false, false, rd, false, byte(0), rCode, uint16(qdcount), uint16(ancount), uint16(0), uint16(0)})
+		//header := setHeader(HeaderOptions{binary.BigEndian.Uint16(id), true, opCode, false, false, rd, false, byte(0), rCode, uint16(qdcount), uint16(ancount), uint16(0), uint16(0)})
+
+		//newRequestInBytes := make([]byte, 12)
+		//copy(newRequestInBytes, receivedData[:3])
+
+		header := setHeader(receivedData[:3], uint16(qdcount), uint16(ancount))
+
+		fmt.Println("Длина header:", len(header))
 
 		response := append(header, questionSection...)
+		fmt.Println("Длина response c questionSection:", len(response))
+
 		response = append(response, answerSection...)
+		fmt.Println("Длина response c answerSection:", len(response))
 
 		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
@@ -131,7 +113,76 @@ type HeaderOptions struct {
 	arcount uint16
 }
 
-func setHeader(headerOptions HeaderOptions) []byte {
+func setHeader(requestInBytes []byte, qdcount uint16, ancount uint16) []byte {
+
+	id := requestInBytes[:2]
+	//fmt.Println("Получено id из буфера:", binary.BigEndian.Uint16(id))
+
+	// allocate a byte for the next 5 options: qr, opCode, aa, tc, rd
+	qrOpCodeAaTcRd := requestInBytes[2]
+	opCodeMask := byte(0b01111000)
+	opCode := qrOpCodeAaTcRd & opCodeMask
+	//fmt.Println("Получено opCode из буфера:", int(opCode)>>3)
+
+	qrMask := byte(0b10000000)
+	qrOpCodeAaTcRd |= qrMask
+
+	var rcode byte
+	if opCode == 0 {
+		rcode = byte(0)
+	} else {
+		rcode = byte(4)
+	}
+
+	// hardcode values
+	ra, z, qdcount, abcount, nscount, arcount := false, byte(0), uint16(qdcount), uint16(ancount), uint16(0), uint16(0)
+
+	// allocate array of 12 bytes
+	header := make([]byte, 12)
+	//fmt.Println("[Make] Длина header начало:", len(header))
+
+	copy(header[0:2], id)
+	//fmt.Println("[Make] Длина header c requestInBytes:", len(header))
+
+	// write 5 options: qr, opCode, aa, tc, rd into header
+	header[2] = qrOpCodeAaTcRd
+
+	// allocate a byte for the next 3 options: ra, z, rcode
+	raZRcode := byte(0)
+
+	raMask := byte(1 << 7)
+
+	if ra {
+		raZRcode |= raMask
+	}
+
+	zMask := (byte(1<<6) | byte(1<<5) | byte(1<<4)) & (z << 3)
+
+	if z > 0 {
+		raZRcode |= zMask
+	}
+
+	rcodeMask := byte(1<<3) | byte(1<<2) | byte(1<<1) | byte(1)
+
+	if rcode > 0 {
+		raZRcode |= rcodeMask & rcode
+	}
+
+	// write 5 options: qr, opCode, aa, tc, rd into header
+	header[3] = raZRcode
+	//fmt.Println("[Make] Длина header c raZRcode:", len(header))
+
+	// white the last 4 options: qdcount, ancount, nscount, arcount into header
+	binary.BigEndian.PutUint16(header[4:], qdcount)
+	binary.BigEndian.PutUint16(header[6:], abcount)
+	binary.BigEndian.PutUint16(header[8:], nscount)
+	binary.BigEndian.PutUint16(header[10:], arcount)
+	//fmt.Println("[Make] Длина header в конце:", len(header))
+
+	return header
+}
+
+func _setHeader(headerOptions HeaderOptions) []byte {
 	// deconstruct
 	id, qr, opCode, aa, tc, rd, ra, z, rcode, qdcount, abcount, nscount, arcount := headerOptions.id, headerOptions.qr, headerOptions.opCode, headerOptions.aa, headerOptions.tc, headerOptions.rd, headerOptions.ra, headerOptions.z, headerOptions.rcode, headerOptions.qdcount, headerOptions.ancount, headerOptions.nscount, headerOptions.arcount
 

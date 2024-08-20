@@ -9,3 +9,5 @@
 module github.com/codecrafters-io/dns-server-starter-go
 
 go 1.22
+
+require golang.org/x/text v0.17.0
