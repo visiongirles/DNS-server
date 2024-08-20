@@ -41,9 +41,36 @@ func main() {
 			break
 		}
 
+		requestInBytes := (buf[:size])
 		receivedData := string(buf[:size])
+
 		fmt.Printf("Received %d bytes from %s: %s\n", size, source, receivedData)
 
+		id := requestInBytes[:2]
+
+		qrOpCodeAaTcRd := requestInBytes[2]
+		qrMask := byte(1 << 7)
+		// TODO: opCodeMask := byte(0b01111000)
+		opCodeMask := byte(1<<6) | byte(1<<5) | byte(1<<4) | byte(1<<3)
+		aaMask := byte(1 << 2)
+		tcMask := byte(1 << 1)
+		rdMask := byte(1)
+
+		qrOpCodeAaTcRd |= qrMask
+		qrOpCodeAaTcRd |= opCodeMask
+		qrOpCodeAaTcRd |= aaMask
+		qrOpCodeAaTcRd |= tcMask
+		qrOpCodeAaTcRd |= rdMask
+
+		opCode := qrOpCodeAaTcRd | byte(0b01111000)
+		var rCode byte
+		if opCode == 0 {
+			rCode = byte(0)
+		} else {
+			rCode = byte(4)
+		}
+
+		rd := qrOpCodeAaTcRd | byte(0b00000001)
 		//  response[0]=1234 >> 8; response[1]= 1234 & 0xFF;
 		// 1234 - это число, наверно подефолту на 32 бита, нам нужно его записать в 16 бит, 2 байта, пишем сначала один байт (>>8), затем второй (& 0xFF - отбрасываем лишние байты)
 		//  потому что 1234 - это 16 бит и ты делишь на 256 ( сдвиг на 8 битов)
@@ -57,7 +84,7 @@ func main() {
 		answerSection, ancount := setAnswerSection(questionSection)
 
 		//header
-		header := setHeader(HeaderOptions{uint16(1234), true, byte(0), false, false, false, false, byte(0), byte(0), uint16(qdcount), uint16(ancount), uint16(0), uint16(0)})
+		header := setHeader(HeaderOptions{binary.BigEndian.Uint16(id), true, opCode, false, false, rd, false, byte(0), rCode, uint16(qdcount), uint16(ancount), uint16(0), uint16(0)})
 
 		response := append(header, questionSection...)
 		response = append(response, answerSection...)
@@ -94,7 +121,7 @@ type HeaderOptions struct {
 	opCode  byte
 	aa      bool
 	tc      bool
-	rd      bool
+	rd      byte
 	ra      bool
 	z       byte
 	rcode   byte
@@ -146,7 +173,7 @@ func setHeader(headerOptions HeaderOptions) []byte {
 		qrOpCodeAaTcRd |= tcMask
 	}
 
-	if rd {
+	if rd != 0 {
 		qrOpCodeAaTcRd |= rdMask
 	}
 
