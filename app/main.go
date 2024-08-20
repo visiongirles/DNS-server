@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"strings"
 )
 
@@ -51,10 +52,15 @@ func main() {
 		// quesitons section
 		questionSection, qdcount := setQuestionSection(questionSectionOptions{"codecrafters.io", A, IN})
 
+		// answer section
+
+		answerSection, ancount := setAnswerSection(questionSection)
+
 		//header
-		header := setHeader(HeaderOptions{uint16(1234), true, byte(0), false, false, false, false, byte(0), byte(0), uint16(qdcount), uint16(0), uint16(0), uint16(0)})
+		header := setHeader(HeaderOptions{uint16(1234), true, byte(0), false, false, false, false, byte(0), byte(0), uint16(qdcount), uint16(ancount), uint16(0), uint16(0)})
 
 		response := append(header, questionSection...)
+		response = append(response, answerSection...)
 
 		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
@@ -74,6 +80,14 @@ type questionSectionOptions struct {
 	class qClass
 }
 
+type answerSectionOptions struct {
+	name   string
+	qType  qType
+	class  qClass
+	TTL    int32
+	length int16
+	data   int32
+}
 type HeaderOptions struct {
 	id      uint16
 	qr      bool
@@ -85,14 +99,14 @@ type HeaderOptions struct {
 	z       byte
 	rcode   byte
 	qdcount uint16
-	abcount uint16
+	ancount uint16
 	nscount uint16
 	arcount uint16
 }
 
 func setHeader(headerOptions HeaderOptions) []byte {
 	// deconstruct
-	id, qr, opCode, aa, tc, rd, ra, z, rcode, qdcount, abcount, nscount, arcount := headerOptions.id, headerOptions.qr, headerOptions.opCode, headerOptions.aa, headerOptions.tc, headerOptions.rd, headerOptions.ra, headerOptions.z, headerOptions.rcode, headerOptions.qdcount, headerOptions.abcount, headerOptions.nscount, headerOptions.arcount
+	id, qr, opCode, aa, tc, rd, ra, z, rcode, qdcount, abcount, nscount, arcount := headerOptions.id, headerOptions.qr, headerOptions.opCode, headerOptions.aa, headerOptions.tc, headerOptions.rd, headerOptions.ra, headerOptions.z, headerOptions.rcode, headerOptions.qdcount, headerOptions.ancount, headerOptions.nscount, headerOptions.arcount
 
 	// masks
 	qrMask := byte(1 << 7)
@@ -157,7 +171,7 @@ func setHeader(headerOptions HeaderOptions) []byte {
 	// write 5 options: qr, opCode, aa, tc, rd into header
 	header[3] = raZRcode
 
-	// white the last 4 options: qdcount, abcount, nscount, arcount into header
+	// white the last 4 options: qdcount, ancount, nscount, arcount into header
 	binary.BigEndian.PutUint16(header[4:], qdcount)
 	binary.BigEndian.PutUint16(header[6:], abcount)
 	binary.BigEndian.PutUint16(header[8:], nscount)
@@ -177,6 +191,26 @@ func setQuestionSection(questionSectionOptions questionSectionOptions) ([]byte, 
 	// name := 'codecrafters.io'
 	// \x00
 
+	response := setLabelToByteArray(name)
+
+	// add nullByte terminator to the end of entry
+	//offset += 1
+
+	// add type info
+	qTypeArray := make([]byte, 2)
+	binary.BigEndian.PutUint16(qTypeArray, uint16(qType))
+	response = append(response, qTypeArray...)
+
+	// add class info
+	classArray := make([]byte, 2)
+	binary.BigEndian.PutUint16(classArray, uint16(class))
+	response = append(response, classArray...)
+
+	return response, numberOfEntries
+
+}
+
+func setLabelToByteArray(name string) []byte {
 	nameSplit := strings.Split(name, ".")
 
 	// null terminator
@@ -194,19 +228,30 @@ func setQuestionSection(questionSectionOptions questionSectionOptions) ([]byte, 
 		//offset += lengthInBytes - 1
 	}
 
-	// add nullByte terminator to the end of entry
 	response = append(response, nullByte)
-	//offset += 1
+
+	return response
+}
+
+func setAnswerSection(response []byte) ([]byte, int) {
+
+	numberOfEntries := 1
 
 	// add type info
-	QtypeArray := make([]byte, 2)
-	binary.BigEndian.PutUint16(QtypeArray, uint16(qType))
-	response = append(response, QtypeArray...)
+	TTLArray := make([]byte, 4)
+	binary.BigEndian.PutUint32(TTLArray, uint32(60))
+	response = append(response, TTLArray...)
 
 	// add class info
-	classArray := make([]byte, 2)
-	binary.BigEndian.PutUint16(classArray, uint16(class))
-	response = append(response, classArray...)
+	lenghtArray := make([]byte, 2)
+
+	//
+	IPversion := 4
+	binary.BigEndian.PutUint16(lenghtArray, uint16(IPversion))
+	response = append(response, lenghtArray...)
+
+	data := setIPdataInBytes()
+	response = append(response, data...)
 
 	return response, numberOfEntries
 
@@ -241,3 +286,14 @@ const (
 	CH
 	HS
 )
+
+func setIPdataInBytes() []byte {
+
+	ip := "80.156.23.56"
+	ipInBytes := net.ParseIP(ip)
+
+	if ipInBytes == nil {
+		os.Exit(1)
+	}
+	return ipInBytes
+}
