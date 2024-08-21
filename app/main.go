@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"fmt"
 	"log"
@@ -42,34 +43,35 @@ func main() {
 		}
 
 		receivedData := buf[:size]
+		fmt.Println("Получен буфер: ", string(receivedData))
 
 		//  response[0]=1234 >> 8; response[1]= 1234 & 0xFF;
 		// 1234 - это число, наверно подефолту на 32 бита, нам нужно его записать в 16 бит, 2 байта, пишем сначала один байт (>>8), затем второй (& 0xFF - отбрасываем лишние байты)
 		//  потому что 1234 - это 16 бит и ты делишь на 256 ( сдвиг на 8 битов)
 
+		// parse request
+		id, qrOpCodeAaTcRd, rcode, _, _, _, questionLength := parseRequest(receivedData)
+
 		// response packet
+		// set header
+		header := setHeader(id, qrOpCodeAaTcRd, rcode)
+		fmt.Println("Размер header:", len(header))
 		// question section
-		questionSection, qdcount := setQuestionSection(questionSectionOptions{"codecrafters.io", A, IN})
+		headerLength := 12
+		questionSection := receivedData[headerLength:(headerLength + questionLength)]
 
 		// answer section
+		answerSection := setAnswerSection(questionSection)
 
-		answerSection, ancount := setAnswerSection(questionSection)
+		// set question section
 
-		//header
-		//header := setHeader(HeaderOptions{binary.BigEndian.Uint16(id), true, opCode, false, false, rd, false, byte(0), rCode, uint16(qdcount), uint16(ancount), uint16(0), uint16(0)})
-
-		//newRequestInBytes := make([]byte, 12)
-		//copy(newRequestInBytes, receivedData[:3])
-
-		header := setHeader(receivedData[:3], uint16(qdcount), uint16(ancount))
-
-		fmt.Println("Длина header:", len(header))
+		// set answer section
 
 		response := append(header, questionSection...)
-		fmt.Println("Длина response c questionSection:", len(response))
+		fmt.Println("Размер response c questionSection:", len(response))
 
 		response = append(response, answerSection...)
-		fmt.Println("Длина response c answerSection:", len(response))
+		fmt.Println("Размер response c answerSection:", len(response))
 
 		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
@@ -113,36 +115,16 @@ type HeaderOptions struct {
 	arcount uint16
 }
 
-func setHeader(requestInBytes []byte, qdcount uint16, ancount uint16) []byte {
-
-	id := requestInBytes[:2]
-	//fmt.Println("Получено id из буфера:", binary.BigEndian.Uint16(id))
-
-	// allocate a byte for the next 5 options: qr, opCode, aa, tc, rd
-	qrOpCodeAaTcRd := requestInBytes[2]
-	opCodeMask := byte(0b01111000)
-	opCode := qrOpCodeAaTcRd & opCodeMask
-	//fmt.Println("Получено opCode из буфера:", int(opCode)>>3)
-
-	qrMask := byte(0b10000000)
-	qrOpCodeAaTcRd |= qrMask
-
-	var rcode byte
-	if opCode == 0 {
-		rcode = byte(0)
-	} else {
-		rcode = byte(4)
-	}
+func setHeader(id []byte, qrOpCodeAaTcRd byte, rcode byte) []byte {
 
 	// hardcode values
-	ra, z, qdcount, abcount, nscount, arcount := false, byte(0), uint16(qdcount), uint16(ancount), uint16(0), uint16(0)
+	ra, z, qdcount, ancount, nscount, arcount := false, byte(0), uint16(1), uint16(1), uint16(0), uint16(0)
 
 	// allocate array of 12 bytes
 	header := make([]byte, 12)
-	//fmt.Println("[Make] Длина header начало:", len(header))
 
+	// white id into header
 	copy(header[0:2], id)
-	//fmt.Println("[Make] Длина header c requestInBytes:", len(header))
 
 	// write 5 options: qr, opCode, aa, tc, rd into header
 	header[2] = qrOpCodeAaTcRd
@@ -150,19 +132,21 @@ func setHeader(requestInBytes []byte, qdcount uint16, ancount uint16) []byte {
 	// allocate a byte for the next 3 options: ra, z, rcode
 	raZRcode := byte(0)
 
-	raMask := byte(1 << 7)
+	raMask := byte(0b10000000)
 
 	if ra {
 		raZRcode |= raMask
 	}
 
-	zMask := (byte(1<<6) | byte(1<<5) | byte(1<<4)) & (z << 3)
+	//zMask := (byte(1<<6) | byte(1<<5) | byte(1<<4)) & (z << 3)
+	zMask := byte(0b01110000) & (z << 3)
 
 	if z > 0 {
 		raZRcode |= zMask
 	}
 
-	rcodeMask := byte(1<<3) | byte(1<<2) | byte(1<<1) | byte(1)
+	//rcodeMask := byte(1<<3) | byte(1<<2) | byte(1<<1) | byte(1)
+	rcodeMask := byte(0b00001111)
 
 	if rcode > 0 {
 		raZRcode |= rcodeMask & rcode
@@ -170,16 +154,76 @@ func setHeader(requestInBytes []byte, qdcount uint16, ancount uint16) []byte {
 
 	// write 5 options: qr, opCode, aa, tc, rd into header
 	header[3] = raZRcode
-	//fmt.Println("[Make] Длина header c raZRcode:", len(header))
 
 	// white the last 4 options: qdcount, ancount, nscount, arcount into header
 	binary.BigEndian.PutUint16(header[4:], qdcount)
-	binary.BigEndian.PutUint16(header[6:], abcount)
+	binary.BigEndian.PutUint16(header[6:], ancount)
 	binary.BigEndian.PutUint16(header[8:], nscount)
 	binary.BigEndian.PutUint16(header[10:], arcount)
-	//fmt.Println("[Make] Длина header в конце:", len(header))
 
 	return header
+}
+
+func parseRequest(requestInBytes []byte) ([]byte, byte, byte, []byte, []byte, []byte, int) {
+	fmt.Println("Длина переданного буфера в parseRequest", len(requestInBytes))
+
+	// parse header
+	headerLength := 12
+	header := requestInBytes[:headerLength]
+	id, qrOpCodeAaTcRd, rcode := parseHeader(header)
+
+	//parse question section
+	label, qClass, qType, questionLength := parseQuestionSection(requestInBytes[headerLength:])
+
+	return id, qrOpCodeAaTcRd, rcode, label, qClass, qType, questionLength
+}
+
+func parseQuestionSection(requestInBytes []byte) ([]byte, []byte, []byte, int) {
+	fmt.Println("Длина переданного буфера в parseQuestionSection", len(requestInBytes))
+	nullByteIndex := bytes.Index(requestInBytes, []byte{0})
+	fmt.Println("nullByteIndex", nullByteIndex)
+
+	labelLength := nullByteIndex + 1
+	typeLength := 2
+	classLength := 2
+	questionLength := labelLength + typeLength + classLength
+
+	label := requestInBytes[:labelLength]
+	// parse type
+	qType := requestInBytes[labelLength:(labelLength + typeLength)]
+
+	// parse class
+	qClass := requestInBytes[(labelLength + typeLength):(labelLength + typeLength + classLength)]
+
+	return label, qClass, qType, questionLength
+}
+
+func parseHeader(requestInBytes []byte) ([]byte, byte, byte) {
+	fmt.Println("Длина переданного буфера в parseHeader", len(requestInBytes))
+
+	// extract id
+	id := requestInBytes[:2]
+
+	// allocate a byte for the next 5 options: qr, opCode, aa, tc, rd
+	qrOpCodeAaTcRd := requestInBytes[2]
+
+	// extract opCode
+	opCodeMask := byte(0b01111000)
+	opCode := qrOpCodeAaTcRd & opCodeMask
+
+	// set qr to 1
+	qrMask := byte(0b10000000)
+	qrOpCodeAaTcRd |= qrMask
+
+	// set rcode based on opCode value
+	// 0 - standard query
+	var rcode byte
+	if opCode == 0 {
+		rcode = byte(0) // no error
+	} else {
+		rcode = byte(4) //else
+	}
+	return id, qrOpCodeAaTcRd, rcode
 }
 
 func _setHeader(headerOptions HeaderOptions) []byte {
@@ -259,7 +303,7 @@ func _setHeader(headerOptions HeaderOptions) []byte {
 
 // TODO: возможно, нужно принимать массив строк. тогда и оценивать QDCount как больше единицы
 // сейчас принимается один name === entry для парсинга, поэтому увеличивает QDCount на единицу
-func setQuestionSection(questionSectionOptions questionSectionOptions) ([]byte, int) {
+func _setQuestionSection(questionSectionOptions questionSectionOptions) ([]byte, int) {
 
 	// deconstruct
 	name, qType, class := questionSectionOptions.name, questionSectionOptions.qType, questionSectionOptions.class
@@ -288,6 +332,11 @@ func setQuestionSection(questionSectionOptions questionSectionOptions) ([]byte, 
 
 }
 
+func setQuestionSection(requestInBytes []byte) []byte {
+	questionSection := requestInBytes
+	return questionSection
+}
+
 func setLabelToByteArray(name string) []byte {
 	nameSplit := strings.Split(name, ".")
 
@@ -311,7 +360,7 @@ func setLabelToByteArray(name string) []byte {
 	return response
 }
 
-func setAnswerSection(response []byte) ([]byte, int) {
+func _setAnswerSection(response []byte) ([]byte, int) {
 
 	numberOfEntries := 1
 
@@ -332,6 +381,27 @@ func setAnswerSection(response []byte) ([]byte, int) {
 	response = append(response, data...)
 
 	return response, numberOfEntries
+
+}
+func setAnswerSection(questionsSection []byte) []byte {
+	answerSection := questionsSection
+
+	// add TTL info
+	TTLArray := make([]byte, 4)
+	binary.BigEndian.PutUint32(TTLArray, uint32(60))
+	answerSection = append(answerSection, TTLArray...)
+
+	// add lenght of IP info
+	lenghtArray := make([]byte, 2)
+	IPversion := 4
+	binary.BigEndian.PutUint16(lenghtArray, uint16(IPversion))
+	answerSection = append(answerSection, lenghtArray...)
+
+	// add IP info
+	data := setIPdataInBytes()
+	answerSection = append(answerSection, data...)
+
+	return answerSection
 
 }
 
