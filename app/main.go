@@ -55,23 +55,18 @@ func main() {
 		// response packet
 		// set header
 		header := setHeader(id, qrOpCodeAaTcRd, rcode)
-		fmt.Println("Размер header:", len(header))
-		// question section
-		headerLength := 12
-		questionSection := receivedData[headerLength:(headerLength + questionLength)]
-
-		// answer section
-		answerSection := setAnswerSection(questionSection)
 
 		// set question section
+		headerLength := 12
+		questionSection := receivedData[headerLength : headerLength+questionLength]
 
 		// set answer section
+		answerSection := setAnswerSection(questionSection)
 
+		// set packet
 		response := append(header, questionSection...)
-		fmt.Println("Размер response c questionSection:", len(response))
 
 		response = append(response, answerSection...)
-		fmt.Println("Размер response c answerSection:", len(response))
 
 		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
