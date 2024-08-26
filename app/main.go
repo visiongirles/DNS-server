@@ -6,6 +6,8 @@ import (
 	"log"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"unsafe"
 )
 
@@ -41,34 +43,7 @@ func main() {
 			break
 		}
 
-		receivedData := buf[:size]
-		fmt.Println("Получен буфер: ", string(receivedData))
-
-		// parse request
-		//id, qrOpCodeAaTcRd, rcode, _, _, _, questionLength := parseRequest(receivedData)
-		parsedRequest := parseRequest(receivedData)
-
-		// response parsedRequest
-		// set header
-		header := setHeader(parsedRequest.header)
-		response := header.setDataToByteArray()
-
-		// set question section
-		questionSection := parsedRequest.questionSection
-
-		// set answer section
-		var answerSectionArray []AnswerSection
-		for _, questionSection := range questionSection {
-			answerSection := setAnswerSection(questionSection)
-			answerSectionArray = append(answerSectionArray, answerSection)
-			response = append(response, questionSection.setDataToByteArray()...)
-		}
-
-		// set parsedRequest
-
-		for _, answerSection := range answerSectionArray {
-			response = append(response, answerSection.setDataToByteArray()...)
-		}
+		response := setDNSResponse(buf, size)
 
 		_, err = udpConn.WriteToUDP(response, source)
 		if err != nil {
@@ -77,34 +52,70 @@ func main() {
 	}
 }
 
-// TODO: rdlength parser questionsection
+func setDNSResponse(buf []byte, size int) []byte {
+	receivedData := buf[:size]
+	fmt.Println("БУФЕР В БАЙТАХ: ", receivedData)
+
+	// parse request
+	parsedRequest := parseRequest(receivedData)
+
+	// set header
+	header := setHeader(parsedRequest.header)
+	response := header.setDataToByteArray()
+	fmt.Println("HEADER в байтах: ", response)
+	fmt.Println("header size: ", len(response))
+
+	// set question section
+	questionSectionArray := parsedRequest.questionSection
+
+	// set answer section
+	var answerSectionArray []AnswerSection
+
+	for _, questionSection := range questionSectionArray {
+		answerSection := setAnswerSection(questionSection)
+		answerSectionArray = append(answerSectionArray, answerSection)
+		response = append(response, questionSection.setDataToByteArray()...)
+	}
+	fmt.Println("questionsection size: ", len(response))
+
+	count := 1
+	for _, answerSection := range answerSectionArray {
+
+		response = append(response, answerSection.setDataToByteArray()...)
+		fmt.Printf("answersection #%d size: %d \n", count, answerSection.length())
+		count++
+	}
+	fmt.Println("answersection size: ", len(response))
+	fmt.Println("РЕЗУЛЬТАТ В БАЙТАХ: ", response)
+
+	return response
+}
+
+// TODO: rlength parser questionsection
 
 // func setQuestionSection(receivedData []byte, parsedRequest Request) []byte {
 // headerLength := 12
-// return receivedData[headerLength:(headerLength + parsedRequest.questionSection.rdlength())]
+// return receivedData[headerLength:(headerLength + parsedRequest.questionSection.rlength())]
 // }
 func parseRequest(requestInBytes []byte) Request {
 	fmt.Println("Длина переданного буфера в parseRequest", len(requestInBytes))
 
 	// parse header
-	headerLength := 12
-	header := requestInBytes[:headerLength]
-	parsedHeader := parseHeader(header)
-	//id, qrOpCodeAaTcRd, rcode := parsedHeader.id, parsedHeader.qrOpCodeAaTcRd, parsedHeader.rcode
+	parsedHeader := parseHeader(requestInBytes)
 
 	//parse question section
-
 	parsedQuestionSectionArray := parseQuestionSection(requestInBytes)
+	parsedHeader.qdcount = uint16(len(parsedQuestionSectionArray))
+	parsedHeader.ancount = uint16(len(parsedQuestionSectionArray))
+
+	fmt.Println("parsedQuestionSectionArray длина", uint16(len(parsedQuestionSectionArray)))
+	fmt.Println("parsedHeader", parsedHeader)
+
 	fmt.Println("=======")
 	fmt.Println("Отпарсенный массив лейблов")
-
 	for _, qs := range parsedQuestionSectionArray {
-		fmt.Println("Лейбл: ", string(qs.label))
+		fmt.Println("Лейбл: ", qs.label)
 	}
-
-	fmt.Println()
-	//label, qType, qClass, questionLength := parsedQuestionSection.label, parsedQuestionSection.qType, parsedQuestionSection.qClass, parsedQuestionSection.questionLength
-
 	return Request{header: parsedHeader, questionSection: parsedQuestionSectionArray}
 }
 
@@ -113,17 +124,23 @@ func parseHeader(requestInBytes []byte) HeaderOptions {
 
 	// extract id
 	id := requestInBytes[:2]
-
+	fmt.Println("id: ", binary.BigEndian.Uint16(id))
+	fmt.Println("id in bytes: ", id)
 	// allocate a byte for the next 5 options: qr, opCode, aa, tc, rd
-	qrOpCodeAaTcRd := requestInBytes[2]
-
-	// extract opCode
-	opCodeMask := byte(0b01111000)
-	opCode := qrOpCodeAaTcRd & opCodeMask
-
+	qrOpCodeAaTcRdRequest := requestInBytes[2]
+	qrOpCodeAaTcRdResponse := byte(0)
 	// set qr to 1
 	qrMask := byte(0b10000000)
-	qrOpCodeAaTcRd |= qrMask
+
+	qrOpCodeAaTcRdResponse |= qrMask
+	// extract opCode
+	opCodeMask := byte(0b01111000)
+	opCode := qrOpCodeAaTcRdRequest & opCodeMask
+	qrOpCodeAaTcRdResponse |= opCode
+
+	rdMask := byte(0b00000001)
+	rd := qrOpCodeAaTcRdRequest & rdMask
+	qrOpCodeAaTcRdResponse |= rd
 
 	// set rcode based on opCode value
 	// 0 - standard query
@@ -133,21 +150,21 @@ func parseHeader(requestInBytes []byte) HeaderOptions {
 	} else {
 		rcode = byte(4) //else
 	}
-	return HeaderOptions{id: id, qrOpCodeAaTcRd: qrOpCodeAaTcRd, rcode: rcode}
+	return HeaderOptions{id: id, qrOpCodeAaTcRd: qrOpCodeAaTcRdResponse, rcode: rcode}
 }
 
-// TODO: вместо массива сделать dictinary: offset + label
-func parseLabels(requestInBytes []byte, offset int) ([]byte, int) {
+// TODO: вместо массива сделать dictionary: offset + label
+func parseLabels(requestInBytes []byte, offset int) ([]string, int) {
 	nullByte := byte(0)
-	var labelArray []byte
+	var labelArray []string
 
 	for requestInBytes[offset] != nullByte {
-		fmt.Println("==============")
-		fmt.Printf("requestInBytes[%d] Размер лейбла: %v\n", offset, requestInBytes[offset])
+		//fmt.Println("==============")
+		//fmt.Printf("requestInBytes[%d] Размер лейбла: %v\n", offset, requestInBytes[offset])
 
-		// check if pointer
 		pointerMask := byte(0b11000000)
 
+		// check for a pointer
 		if (requestInBytes[offset] & pointerMask) == pointerMask {
 			offsetMask := byte(0b00111111)
 			newOffsetInBytes := []byte{requestInBytes[offset] & offsetMask, requestInBytes[offset+1]}
@@ -156,21 +173,23 @@ func parseLabels(requestInBytes []byte, offset int) ([]byte, int) {
 			labelArray = append(labelArray, result...)
 			offset += 2
 			return labelArray, offset
-
 		}
+
+		// check label's length
 		labelLength := int(requestInBytes[offset])
 		offset += 1
 
 		//fmt.Println("Offset после размера контента", offset)
 
+		// check label's content
 		content := requestInBytes[offset : offset+labelLength]
 		offset += labelLength
-		fmt.Println(" Label: ", string(content))
-		fmt.Println("Offset после 1 байта с размером контекта и самим контентом", offset)
-		labelArray = append(labelArray, content...)
-
+		//fmt.Println(" Label: ", string(content))
+		//fmt.Println("Offset после 1 байта с размером контекта и самим контентом", offset)
+		labelArray = append(labelArray, string(content))
 	}
-	labelArray = append(labelArray, nullByte)
+
+	// skip of nullByte
 	offset += 1
 
 	return labelArray, offset
@@ -185,18 +204,14 @@ func parseQuestionSection(requestInBytes []byte) []QuestionSection {
 
 	for offset < len(requestInBytes) {
 		//fmt.Println("=========")
-
 		//fmt.Println("Offset в начале цикла", offset)
 		//fmt.Println("Что лежит по данному элементу массива", int(requestInBytes[offset]))
-		startIndex := offset
-		labelArray, newOffset := parseLabels(requestInBytes, startIndex)
+		labelArray, newOffset := parseLabels(requestInBytes, offset)
 		offset = newOffset
 
-		//labelLength := offset - startIndex
 		typeLength := 2
 		classLength := 2
 
-		//label := requestInBytes[startIndex:labelLength]
 		// parse type
 		qType := requestInBytes[offset:(offset + typeLength)]
 		offset += typeLength
@@ -216,7 +231,7 @@ func setHeader(headerOptions HeaderOptions) HeaderOptions {
 	rcode := headerOptions.rcode
 
 	// hardcode values
-	ra, z, qdcount, ancount, nscount, arcount := false, byte(0), uint16(1), uint16(1), uint16(0), uint16(0)
+	ra, z, nscount, arcount := false, byte(0), uint16(0), uint16(0)
 
 	// allocate a byte for the next 3 options: ra, z, rcode
 	raZRcode := byte(0)
@@ -244,8 +259,8 @@ func setHeader(headerOptions HeaderOptions) HeaderOptions {
 		qrOpCodeAaTcRd: headerOptions.qrOpCodeAaTcRd,
 		rcode:          headerOptions.rcode,
 		raZRcode:       raZRcode,
-		qdcount:        qdcount,
-		ancount:        ancount,
+		qdcount:        headerOptions.qdcount,
+		ancount:        headerOptions.ancount,
 		nscount:        nscount,
 		arcount:        arcount,
 	}
@@ -253,10 +268,10 @@ func setHeader(headerOptions HeaderOptions) HeaderOptions {
 
 func setAnswerSection(questionsSection QuestionSection) AnswerSection {
 
-	//hardcode value for TTL - any
+	// hardcode value for ttl - any
 	ttl := uint32(60)
 
-	// add rdlength of IP info
+	// add rlength of IP info
 	// hardcode value - 4
 	IPVersion := uint16(4)
 
@@ -264,21 +279,25 @@ func setAnswerSection(questionsSection QuestionSection) AnswerSection {
 	// hardcode value - "80.156.23.56"
 	data := setIPIntoBytes()
 
-	return AnswerSection{label: questionsSection.label, qType: questionsSection.qType, qClass: questionsSection.qClass, TTL: ttl, rdlength: IPVersion, rdata: data}
+	return AnswerSection{questionSection: questionsSection, ttl: ttl, rlength: IPVersion, rdata: data}
 }
 
 func setIPIntoBytes() []byte {
 
 	// hardcode ip address
-	ip := "80.156.23.56"
+	ip := "8.8.8.8"
 
-	// convert ip into []bytes
-	ipInBytes := net.ParseIP(ip)
-
-	if ipInBytes == nil {
-		os.Exit(1)
+	parserdId := strings.Split(ip, ".")
+	var ipInByte []byte
+	for _, ipPart := range parserdId {
+		num, err := strconv.Atoi(ipPart)
+		if err != nil {
+			fmt.Println("Error:", err)
+			os.Exit(1)
+		}
+		ipInByte = append(ipInByte, uint8(num))
 	}
-	return ipInBytes
+	return ipInByte
 }
 
 type Request struct {
@@ -319,19 +338,31 @@ func (h *HeaderOptions) setDataToByteArray() []byte {
 }
 
 type QuestionSection struct {
-	label  []byte
+	label  LabelArray
 	qType  []byte
 	qClass []byte
 }
 
 func (q *QuestionSection) setDataToByteArray() []byte {
-	// allocate array of 12 bytes
 
 	questionSection := make([]byte, q.length())
 
-	// white id into questionSection
-	labelLength := len(q.label)
-	copy(questionSection[0:labelLength], q.label)
+	var label []byte
+	labelLength := 0
+
+	for _, labelPart := range q.label {
+
+		labelPartLength := len(labelPart)            // размер стринг
+		label = append(label, byte(labelPartLength)) // положить размер в 1 байт
+		labelLength += 1
+
+		label = append(label, []byte(labelPart)...) // сам лейбл
+		labelLength += labelPartLength
+	}
+	label = append(label, byte(0)) // добавить null byte
+	labelLength += 1
+
+	copy(questionSection[0:labelLength], label)
 
 	copy(questionSection[labelLength:labelLength+2], q.qType)
 
@@ -340,42 +371,40 @@ func (q *QuestionSection) setDataToByteArray() []byte {
 	return questionSection
 }
 func (q *QuestionSection) length() int {
-	return len(q.label) + len(q.qType) + len(q.qClass)
+	// 1 байт под размер
+	// N байт под сам лейбл
+	// 1 байт под  null byte в конце
+	labelLength := 0
+	for _, labelPart := range q.label {
+		labelLength += 1              // 1 байт под размер
+		labelLength += len(labelPart) // сам лейбл
+	}
+	labelLength += 1 // null byte в конце
+	return labelLength + len(q.qType) + len(q.qClass)
 }
 
 type AnswerSection struct {
-	label    []byte
-	qType    []byte
-	qClass   []byte
-	TTL      uint32
-	rdlength uint16
-	rdata    []byte
+	questionSection QuestionSection
+	ttl             uint32
+	rlength         uint16
+	rdata           []byte
 }
 
 func (a *AnswerSection) setDataToByteArray() []byte {
-	// allocate array of 12 bytes
+	// allocate array of bytes
 	answerSection := make([]byte, a.length())
+	fmt.Println("размер выделенного массива под ответ: ", len(answerSection))
 
-	// white id into answerSection
-	labelLength := len(a.label)
-	labelStartIndex := 0
-	copy(answerSection[labelStartIndex:], a.label)
-
-	qTypeLength := 2
-	qTypeStartIndex := labelStartIndex + labelLength
-	copy(answerSection[qTypeStartIndex:], a.qType)
-
-	qClassLength := 2
-	qClassStartIndex := qTypeStartIndex + qTypeLength
-	copy(answerSection[qClassStartIndex:], a.qClass)
-
+	// write question section into answerSection
+	copy(answerSection[0:], a.questionSection.setDataToByteArray())
+	fmt.Println("первая часть в ответе question section: ", len(a.questionSection.setDataToByteArray()))
 	ttlLength := 4
-	ttlStartIndex := qClassStartIndex + qClassLength
-	binary.BigEndian.PutUint32(answerSection[ttlStartIndex:], a.TTL)
+	ttlStartIndex := a.questionSection.length()
+	binary.BigEndian.PutUint32(answerSection[ttlStartIndex:], a.ttl)
 
 	rdlengthSize := 2
 	rdlengthStartIndex := ttlStartIndex + ttlLength
-	binary.BigEndian.PutUint16(answerSection[rdlengthStartIndex:], a.rdlength)
+	binary.BigEndian.PutUint16(answerSection[rdlengthStartIndex:], a.rlength)
 
 	rdataStartIndex := rdlengthStartIndex + rdlengthSize
 	copy(answerSection[rdataStartIndex:], a.rdata)
@@ -383,12 +412,18 @@ func (a *AnswerSection) setDataToByteArray() []byte {
 	return answerSection
 }
 func (a *AnswerSection) length() int {
-	ttlSize := int(unsafe.Sizeof(a.TTL))           // TODO: 4
-	rdlengthSize := int(unsafe.Sizeof(a.rdlength)) // TODO: 2
+	ttlSize := int(unsafe.Sizeof(a.ttl))          // TODO: 4
+	rdlengthSize := int(unsafe.Sizeof(a.rlength)) // TODO: 2
+	fmt.Println("a.questionSection.length()", a.questionSection.length())
+	fmt.Println("ttlSize", ttlSize)
+	fmt.Println("rdlengthSize", rdlengthSize)
+	fmt.Println("a.rdata", len(a.rdata))
 
-	return len(a.label) + len(a.qType) + len(a.qClass) + ttlSize + rdlengthSize + len(a.rdata)
+	return a.questionSection.length() + ttlSize + rdlengthSize + len(a.rdata)
 }
 
 //  response[0]=1234 >> 8; response[1]= 1234 & 0xFF;
 // 1234 - это число, наверно подефолту на 32 бита, нам нужно его записать в 16 бит, 2 байта, пишем сначала один байт (>>8), затем второй (& 0xFF - отбрасываем лишние байты)
 //  потому что 1234 - это 16 бит и ты делишь на 256 ( сдвиг на 8 битов)
+
+type LabelArray []string
