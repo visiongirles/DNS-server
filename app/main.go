@@ -385,8 +385,10 @@ func setHeader(headerOptions HeaderOptions, numberOfQestionsSections int, number
 		qrOpCodeAaTcRdResponse |= qrMask
 	}
 
+	// Operation Code (OPCODE)
+	// Specifies the kind of query in a message.
 	//opCodeMask := byte(0b01111000)
-	//opCode := qrOpCodeAaTcRdRequest & opCodeMask
+	//opCode := headerOptions.qrOpCodeAaTcRd & opCodeMask
 
 	// hardcode values
 	// Recursion Available (RA)
@@ -403,27 +405,38 @@ func setHeader(headerOptions HeaderOptions, numberOfQestionsSections int, number
 	//ra, z, nscount, arcount := false, byte(0), uint16(0), uint16(0)
 	nscount, arcount := uint16(0), uint16(0)
 
-	// allocate a byte for the next 3 options: ra, z, rcode
-	//raZRcode := byte(0)
-	//
-	//raMask := byte(0b10000000)
-	//
-	//if ra {
-	//	raZRcode |= raMask
-	//}
-	//
-	//zMask := byte(0b01110000) & (z << 3)
-	//
-	//if z > 0 {
-	//	raZRcode |= zMask
-	//}
+	raZRcodeRequest := headerOptions.raZRcode
 
+	// allocate a byte for the next 3 options: ra, z, rcode
+	raZRcodeResponse := byte(0)
+
+	// Recursion Available (RA)
+	// Server sets this to 1 to indicate that recursion is available.
+	raMask := byte(0b10000000)
+	ra := raZRcodeRequest & raMask
+	raZRcodeResponse |= ra
+
+	// Reserved (Z)
+	// Used by DNSSEC queries. At inception, it was reserved for future use.
+	zMask := byte(0b01110000)
+	z := raZRcodeRequest & zMask
+	raZRcodeResponse |= z
+
+	// Response Code (RCODE)
+	// 0 (no error) if OPCODE is 0 (standard query) else 4 (not implemented)
 	//rcodeMask := byte(0b00001111)
+
+	opCodeMask := byte(0b01111000)
+	opCode := headerOptions.qrOpCodeAaTcRd & opCodeMask
+
+	if opCode != 0 {
+		raZRcodeResponse |= byte(0b00000100)
+	}
 
 	return HeaderOptions{
 		id:             headerOptions.id,
 		qrOpCodeAaTcRd: qrOpCodeAaTcRdResponse,
-		raZRcode:       headerOptions.raZRcode,
+		raZRcode:       raZRcodeResponse,
 		qdcount:        uint16(numberOfQestionsSections),
 		ancount:        uint16(numberOfAnswerSections),
 		nscount:        nscount,
