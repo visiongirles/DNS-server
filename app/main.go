@@ -11,20 +11,25 @@ import (
 	"unsafe"
 )
 
+//func sendDNSMessage(address: string)
+
 func main() {
 	fmt.Println("Logs from your program will appear here!")
 
-	udpAddr, err := net.ResolveUDPAddr("udp", "127.0.0.1:2053")
+	receivingAddress := "127.0.0.1:2053"
+
+	udpAddr, err := net.ResolveUDPAddr("udp", receivingAddress)
 	if err != nil {
-		fmt.Println("Failed to resolve UDP address:", err)
+		fmt.Println("Failed to resolve UDP receivingAddress:", err)
 		return
 	}
 
 	udpConn, err := net.ListenUDP("udp", udpAddr)
 	if err != nil {
-		fmt.Println("Failed to bind to address:", err)
+		fmt.Println("Failed to bind to receivingAddress:", err)
 		return
 	}
+
 	defer func(udpConn *net.UDPConn) {
 		err := udpConn.Close()
 		if err != nil {
@@ -43,24 +48,126 @@ func main() {
 			break
 		}
 
-		response := setDNSResponse(buf, size)
+		receivedData := buf[:size]
+		fmt.Println("БУФЕР В БАЙТАХ: ", receivedData)
 
-		_, err = udpConn.WriteToUDP(response, source)
-		if err != nil {
-			fmt.Println("Failed to send response:", err)
+		// parse request
+		parsedRequest := parseRequest(receivedData)
+
+		// 1. Проверка если ли флаг --resolver"
+		// 2. парсим буффер и форвард
+		if len(os.Args) > 2 {
+			command := os.Args[1]
+			if command == "--resolver" {
+				forwardingAddress := os.Args[2]
+
+				answerBuf := make([]byte, 512)
+				headerSize := 12
+				bytesFromRead := 0
+				offset := 0
+
+				questionSectionSize := []int{}
+				answerSectionSize := []int{}
+
+				headerForward := parsedRequest.header
+
+				answerSectionInBytes := []byte{}
+
+				for _, questionSection := range parsedRequest.questionSection {
+
+					questionSectionSize = append(questionSectionSize, questionSection.length())
+
+					//request := Request{header: parsedRequest.header, questionSection: []QuestionSection{questionSection}}
+
+					header := setHeader(headerForward, 1, 0)
+
+					headerInBytes := header.setDataToByteArray()
+					fmt.Println("[FORWARD] Header for forward in bytes", headerInBytes)
+					questionSectionInBytes := questionSection.setDataToByteArray()
+
+					request := append(headerInBytes, questionSectionInBytes...)
+					fmt.Println("[FORWARD] Request for forward in bytes", request)
+
+					//_, err = udpConn.WriteToUDP(request, source)
+					//p :=  make([]byte, 512)
+					updConnForward, err := net.Dial("udp", forwardingAddress)
+					if err != nil {
+						fmt.Printf("Some error %v", err)
+						return
+					}
+
+					_, errWrite := updConnForward.Write(request)
+
+					if errWrite != nil {
+						fmt.Printf("Some error %v", err)
+						return
+					}
+
+					bytesRead, errRead := updConnForward.Read(answerBuf[offset:])
+					answerSectionSize = append(answerSectionSize, bytesRead-headerSize-questionSection.length())
+					bytesFromRead += bytesRead
+					answerSectionInBytes = append(answerSectionInBytes, answerBuf[len(request):]...)
+					if errRead != nil {
+						fmt.Printf("Some error %v", err)
+						return
+					}
+
+					offset += len(answerBuf)
+					//answerBuf = append(answerBuf, buf[:size]...)
+				}
+				fmt.Println("ОТВЕТ от форвард в байтах: ", answerBuf[:bytesFromRead])
+				receivedData = answerBuf[:bytesFromRead]
+
+				newHeader := setHeader(parsedRequest.header, int(parsedRequest.header.qdcount), int(parsedRequest.header.qdcount))
+				response := newHeader.setDataToByteArray()
+
+				for _, questionSection := range parsedRequest.questionSection {
+					response = append(response, questionSection.setDataToByteArray()...)
+				}
+
+				response = append(response, answerSectionInBytes...)
+				_, err = udpConn.WriteToUDP(response, source)
+				if err != nil {
+					fmt.Println("Failed to send response:", err)
+				}
+
+			} else {
+				fmt.Fprintf(os.Stderr, "Command %s hasn't been implemented", command)
+				os.Exit(1)
+			}
+		} else {
+			response := setDNSResponse(parsedRequest)
+
+			_, err = udpConn.WriteToUDP(response, source)
+			if err != nil {
+				fmt.Println("Failed to send response:", err)
+			}
 		}
+
+	}
+
+	sendUDPPacket(receivingAddress)
+}
+
+func sendRequest(conn *net.UDPConn, addr string, request []byte) {
+	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+
+	_, errWrite := conn.WriteToUDP(request, udpAddr)
+	if errWrite != nil {
+		fmt.Printf("Couldn't send response %v", err)
 	}
 }
 
-func setDNSResponse(buf []byte, size int) []byte {
-	receivedData := buf[:size]
-	fmt.Println("БУФЕР В БАЙТАХ: ", receivedData)
+func sendUDPPacket(receivingAddress string) {
 
-	// parse request
-	parsedRequest := parseRequest(receivedData)
+}
+
+func setDNSResponse(parsedRequest Request) []byte {
 
 	// set header
-	header := setHeader(parsedRequest.header)
+	numberOfQuestionsSections, numberOfAnswerSections := len(parsedRequest.questionSection), len(parsedRequest.questionSection)
+	header := setHeader(parsedRequest.header, numberOfQuestionsSections, numberOfAnswerSections)
+
 	response := header.setDataToByteArray()
 	fmt.Println("HEADER в байтах: ", response)
 	fmt.Println("header size: ", len(response))
@@ -105,11 +212,9 @@ func parseRequest(requestInBytes []byte) Request {
 
 	//parse question section
 	parsedQuestionSectionArray := parseQuestionSection(requestInBytes)
-	parsedHeader.qdcount = uint16(len(parsedQuestionSectionArray))
-	parsedHeader.ancount = uint16(len(parsedQuestionSectionArray))
 
 	fmt.Println("parsedQuestionSectionArray длина", uint16(len(parsedQuestionSectionArray)))
-	fmt.Println("parsedHeader", parsedHeader)
+	fmt.Println("parsedHeader", parsedHeader.setDataToByteArray())
 
 	fmt.Println("=======")
 	fmt.Println("Отпарсенный массив лейблов")
@@ -122,35 +227,80 @@ func parseRequest(requestInBytes []byte) Request {
 func parseHeader(requestInBytes []byte) HeaderOptions {
 	fmt.Println("Длина переданного буфера в parseHeader", len(requestInBytes))
 
-	// extract id
+	//Packet Identifier (ID)
+	// ID assigned to query packets. Response packets must reply with the same ID
 	id := requestInBytes[:2]
 	fmt.Println("id: ", binary.BigEndian.Uint16(id))
 	fmt.Println("id in bytes: ", id)
+
 	// allocate a byte for the next 5 options: qr, opCode, aa, tc, rd
 	qrOpCodeAaTcRdRequest := requestInBytes[2]
 	qrOpCodeAaTcRdResponse := byte(0)
-	// set qr to 1
-	qrMask := byte(0b10000000)
 
-	qrOpCodeAaTcRdResponse |= qrMask
-	// extract opCode
+	// Query/Response Indicator (QR)
+	// 1 for a reply packet, 0 for a question packet.
+	qrMask := byte(0b10000000)
+	qr := qrOpCodeAaTcRdRequest & qrMask
+	qrOpCodeAaTcRdResponse |= qr
+
+	// Operation Code (OPCODE)
+	// Specifies the kind of query in a message.
 	opCodeMask := byte(0b01111000)
 	opCode := qrOpCodeAaTcRdRequest & opCodeMask
 	qrOpCodeAaTcRdResponse |= opCode
 
+	// Authoritative Answer (AA)
+	// 1 if the responding server "owns" the domain queried, i.e., it's authoritative.
+	aaMask := byte(0b00000100)
+	aa := qrOpCodeAaTcRdRequest & aaMask
+	qrOpCodeAaTcRdResponse |= aa
+
+	// Truncation (TC)
+	// 1 if the message is larger than 512 bytes. Always 0 in UDP responses.
+	tcMask := byte(0b00000010)
+	tc := qrOpCodeAaTcRdRequest & tcMask
+	qrOpCodeAaTcRdResponse |= tc
+
+	// Recursion Desired (RD)
+	// Sender sets this to 1 if the server should recursively resolve this query, 0 otherwise.
 	rdMask := byte(0b00000001)
 	rd := qrOpCodeAaTcRdRequest & rdMask
 	qrOpCodeAaTcRdResponse |= rd
 
+	// extract value for 3 options: ra, z rcode
+	raZRcodeRequest := requestInBytes[3]
+
+	// allocate a byte for the next 3 options: ra, z rcode
+	raZRcodeResponse := byte(0)
+
+	//Recursion Available (RA)
+	// Server sets this to 1 to indicate that recursion is available.
+	raMask := byte(0b10000000)
+	ra := raZRcodeRequest & raMask
+	raZRcodeResponse |= ra
+
+	//Reserved (Z)	3 bits
+	// Used by DNSSEC queries. At inception, it was reserved for future use.
+	zMask := byte(0b01110000)
+	z := raZRcodeRequest & zMask
+	raZRcodeResponse |= z
+
+	// Response Code (RCODE)	4 bits
+	// Response code indicating the status of the response.
+	//	0 (no error).
+
 	// set rcode based on opCode value
 	// 0 - standard query
-	var rcode byte
-	if opCode == 0 {
-		rcode = byte(0) // no error
-	} else {
-		rcode = byte(4) //else
+	rcodeMask := byte(0b00001111)
+	if opCode != 0 {
+		raZRcodeResponse |= rcodeMask // if error
 	}
-	return HeaderOptions{id: id, qrOpCodeAaTcRd: qrOpCodeAaTcRdResponse, rcode: rcode}
+
+	// Question Count (QDCOUNT)
+	// Number of questions in the Question section.
+	qdcount := binary.BigEndian.Uint16(requestInBytes[4:6])
+
+	return HeaderOptions{id: id, qrOpCodeAaTcRd: qrOpCodeAaTcRdResponse, raZRcode: raZRcodeResponse, qdcount: qdcount, ancount: 0, nscount: 0, arcount: 0}
 }
 
 // TODO: вместо массива сделать dictionary: offset + label
@@ -226,41 +376,56 @@ func parseQuestionSection(requestInBytes []byte) []QuestionSection {
 	return parsedQuestionSectionArray
 }
 
-func setHeader(headerOptions HeaderOptions) HeaderOptions {
+func setHeader(headerOptions HeaderOptions, numberOfQestionsSections int, numberOfAnswerSections int) HeaderOptions {
 
-	rcode := headerOptions.rcode
+	qrOpCodeAaTcRdResponse := headerOptions.qrOpCodeAaTcRd
+
+	if numberOfAnswerSections > 0 {
+		qrMask := byte(0b10000000)
+		qrOpCodeAaTcRdResponse |= qrMask
+	}
+
+	//opCodeMask := byte(0b01111000)
+	//opCode := qrOpCodeAaTcRdRequest & opCodeMask
 
 	// hardcode values
-	ra, z, nscount, arcount := false, byte(0), uint16(0), uint16(0)
+	// Recursion Available (RA)
+	// Server sets this to 1 to indicate that recursion is available.
+
+	// Reserved (Z)
+	//Used by DNSSEC queries. At inception, it was reserved for future use.
+
+	// Authority Record Count (NSCOUNT)
+	// Number of records in the Authority section.
+
+	// Additional Record Count (ARCOUNT)
+	// Number of records in the Additional section.
+	//ra, z, nscount, arcount := false, byte(0), uint16(0), uint16(0)
+	nscount, arcount := uint16(0), uint16(0)
 
 	// allocate a byte for the next 3 options: ra, z, rcode
-	raZRcode := byte(0)
+	//raZRcode := byte(0)
+	//
+	//raMask := byte(0b10000000)
+	//
+	//if ra {
+	//	raZRcode |= raMask
+	//}
+	//
+	//zMask := byte(0b01110000) & (z << 3)
+	//
+	//if z > 0 {
+	//	raZRcode |= zMask
+	//}
 
-	raMask := byte(0b10000000)
-
-	if ra {
-		raZRcode |= raMask
-	}
-
-	zMask := byte(0b01110000) & (z << 3)
-
-	if z > 0 {
-		raZRcode |= zMask
-	}
-
-	rcodeMask := byte(0b00001111)
-
-	if rcode > 0 {
-		raZRcode |= rcodeMask & rcode
-	}
+	//rcodeMask := byte(0b00001111)
 
 	return HeaderOptions{
 		id:             headerOptions.id,
-		qrOpCodeAaTcRd: headerOptions.qrOpCodeAaTcRd,
-		rcode:          headerOptions.rcode,
-		raZRcode:       raZRcode,
-		qdcount:        headerOptions.qdcount,
-		ancount:        headerOptions.ancount,
+		qrOpCodeAaTcRd: qrOpCodeAaTcRdResponse,
+		raZRcode:       headerOptions.raZRcode,
+		qdcount:        uint16(numberOfQestionsSections),
+		ancount:        uint16(numberOfAnswerSections),
 		nscount:        nscount,
 		arcount:        arcount,
 	}
@@ -308,7 +473,6 @@ type Request struct {
 type HeaderOptions struct {
 	id             []byte
 	qrOpCodeAaTcRd byte
-	rcode          byte
 	raZRcode       byte
 	qdcount        uint16
 	ancount        uint16
