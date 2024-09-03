@@ -8,12 +8,13 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"unsafe"
+	"sync"
 )
 
 //func sendDNSMessage(address: string)
 
 func main() {
+
 	fmt.Println("Logs from your program will appear here!")
 
 	receivingAddress := "127.0.0.1:2053"
@@ -57,84 +58,24 @@ func main() {
 		// 1. Проверка если ли флаг --resolver"
 		// 2. парсим буффер и форвард
 		if len(os.Args) > 2 {
+
 			command := os.Args[1]
-			if command == "--resolver" {
-				forwardingAddress := os.Args[2]
 
-				answerBuf := make([]byte, 512)
-				headerSize := 12
-				bytesFromRead := 0
-				offset := 0
-
-				questionSectionSize := []int{}
-				answerSectionSize := []int{}
-
-				headerForward := parsedRequest.header
-
-				answerSectionInBytes := []byte{}
-
-				for _, questionSection := range parsedRequest.questionSection {
-
-					questionSectionSize = append(questionSectionSize, questionSection.length())
-
-					//request := Request{header: parsedRequest.header, questionSection: []QuestionSection{questionSection}}
-
-					header := setHeader(headerForward, 1, 0)
-
-					headerInBytes := header.setDataToByteArray()
-					fmt.Println("[FORWARD] Header for forward in bytes", headerInBytes)
-					questionSectionInBytes := questionSection.setDataToByteArray()
-
-					request := append(headerInBytes, questionSectionInBytes...)
-					fmt.Println("[FORWARD] Request for forward in bytes", request)
-
-					//_, err = udpConn.WriteToUDP(request, source)
-					//p :=  make([]byte, 512)
-					updConnForward, err := net.Dial("udp", forwardingAddress)
-					if err != nil {
-						fmt.Printf("Some error %v", err)
+			switch command {
+			case "--resolver":
+				{
+					_, done := forwardDNSPacket(parsedRequest, receivedData, err, udpConn, source)
+					if done {
 						return
 					}
-
-					_, errWrite := updConnForward.Write(request)
-
-					if errWrite != nil {
-						fmt.Printf("Some error %v", err)
-						return
-					}
-
-					bytesRead, errRead := updConnForward.Read(answerBuf[offset:])
-					answerSectionSize = append(answerSectionSize, bytesRead-headerSize-questionSection.length())
-					bytesFromRead += bytesRead
-					answerSectionInBytes = append(answerSectionInBytes, answerBuf[len(request):]...)
-					if errRead != nil {
-						fmt.Printf("Some error %v", err)
-						return
-					}
-
-					offset += len(answerBuf)
-					//answerBuf = append(answerBuf, buf[:size]...)
 				}
-				fmt.Println("ОТВЕТ от форвард в байтах: ", answerBuf[:bytesFromRead])
-				receivedData = answerBuf[:bytesFromRead]
-
-				newHeader := setHeader(parsedRequest.header, int(parsedRequest.header.qdcount), int(parsedRequest.header.qdcount))
-				response := newHeader.setDataToByteArray()
-
-				for _, questionSection := range parsedRequest.questionSection {
-					response = append(response, questionSection.setDataToByteArray()...)
+			default:
+				{
+					fmt.Fprintf(os.Stderr, "Command %s hasn't been implemented", command)
+					os.Exit(1)
 				}
-
-				response = append(response, answerSectionInBytes...)
-				_, err = udpConn.WriteToUDP(response, source)
-				if err != nil {
-					fmt.Println("Failed to send response:", err)
-				}
-
-			} else {
-				fmt.Fprintf(os.Stderr, "Command %s hasn't been implemented", command)
-				os.Exit(1)
 			}
+
 		} else {
 			response := setDNSResponse(parsedRequest)
 
@@ -145,21 +86,120 @@ func main() {
 		}
 
 	}
-
-	sendUDPPacket(receivingAddress)
 }
 
-func sendRequest(conn *net.UDPConn, addr string, request []byte) {
-	udpAddr, err := net.ResolveUDPAddr("udp", addr)
+var wg sync.WaitGroup
 
-	_, errWrite := conn.WriteToUDP(request, udpAddr)
-	if errWrite != nil {
-		fmt.Printf("Couldn't send response %v", err)
+func forwardDNSPacket(
+	parsedRequest Request,
+	receivedData []byte,
+	err error,
+	udpConn *net.UDPConn,
+	source *net.UDPAddr,
+) (error, bool) {
+
+	forwardingAddress := os.Args[2]
+
+	answerBuf := make([]byte, 512)
+	headerSize := 12
+	bytesFromRead := 0
+	offset := 0
+
+	var pairs sync.Map
+
+	//questionSectionSize := []int{}
+	//answerSectionSize := []int{}
+
+	headerForward := parsedRequest.header
+
+	//answerSectionInBytes := []byte{}
+
+	for _, questionSection := range parsedRequest.questionSection {
+		wg.Add(1)
+
+		//questionSectionSize = append(questionSectionSize, questionSection.length())
+
+		header := setHeader(headerForward, 1, 0)
+
+		headerInBytes := header.setDataToByteArray()
+		fmt.Println("[FORWARD] Header for forward in bytes", headerInBytes)
+		questionSectionInBytes := questionSection.setDataToByteArray()
+
+		request := append(headerInBytes, questionSectionInBytes...)
+		fmt.Println("[FORWARD] Request for forward in bytes", request)
+
+		// Forward DNS Packet to forwarding server
+		bytes, answerSection, err2, b, done := forwardQuestionSection(
+			forwardingAddress,
+			request,
+			answerBuf,
+			offset,
+			answerSectionSize,
+			headerSize,
+			questionSection,
+			answerSectionInBytes,
+		)
+		bytesFromRead += bytes
+		if done {
+			return err2, b
+		}
 	}
+
+	wg.Wait()
+	fmt.Println("ОТВЕТ от форвард в байтах: ", answerBuf[:bytesFromRead])
+	receivedData = answerBuf[:bytesFromRead]
+
+	newHeader := setHeader(parsedRequest.header, int(parsedRequest.header.qdcount), int(parsedRequest.header.qdcount))
+	response := newHeader.setDataToByteArray()
+
+	for _, questionSection := range parsedRequest.questionSection {
+		response = append(response, questionSection.setDataToByteArray()...)
+	}
+
+	response = append(response, answerSectionInBytes...)
+	_, err = udpConn.WriteToUDP(response, source)
+	if err != nil {
+		fmt.Println("Failed to send response:", err)
+	}
+
+	return err, false
 }
 
-func sendUDPPacket(receivingAddress string) {
+func forwardQuestionSection(
+	forwardingAddress string,
+	request []byte,
+	answerBuf []byte,
+	offset int,
+	answerSectionSize []int,
+	headerSize int,
+	questionSection QuestionSection,
+	answerSectionInBytes []byte) (int, []byte, error, bool, bool) {
+	defer wg.Done()
 
+	updConnForward, err := net.Dial("udp", forwardingAddress)
+	if err != nil {
+		fmt.Printf("Some error %v", err)
+		return 0, nil, nil, true, true
+	}
+
+	_, errWrite := updConnForward.Write(request)
+
+	if errWrite != nil {
+		fmt.Printf("Some error %v", err)
+		return 0, nil, nil, true, true
+	}
+
+	bytesRead, errRead := updConnForward.Read(answerBuf[offset:])
+	answerSectionSize = append(answerSectionSize, bytesRead-headerSize-questionSection.length())
+
+	answerSectionInBytes = append(answerSectionInBytes, answerBuf[len(request):]...)
+	if errRead != nil {
+		fmt.Printf("Some error %v", err)
+		return 0, nil, nil, true, true
+	}
+
+	offset += len(answerBuf)
+	return bytesRead, answerSectionInBytes, nil, false, false
 }
 
 func setDNSResponse(parsedRequest Request) []byte {
@@ -477,130 +517,3 @@ func setIPIntoBytes() []byte {
 	}
 	return ipInByte
 }
-
-type Request struct {
-	header          HeaderOptions
-	questionSection []QuestionSection
-}
-
-type HeaderOptions struct {
-	id             []byte
-	qrOpCodeAaTcRd byte
-	raZRcode       byte
-	qdcount        uint16
-	ancount        uint16
-	nscount        uint16
-	arcount        uint16
-}
-
-func (h *HeaderOptions) setDataToByteArray() []byte {
-	// allocate array of 12 bytes
-	header := make([]byte, 12)
-
-	// white id into header
-	copy(header[0:2], h.id)
-
-	// write 5 options: qr, opCode, aa, tc, rd into header
-	header[2] = h.qrOpCodeAaTcRd
-
-	header[3] = h.raZRcode
-
-	// white the last 4 options: qdcount, ancount, nscount, arcount into header
-	binary.BigEndian.PutUint16(header[4:], h.qdcount)
-	binary.BigEndian.PutUint16(header[6:], h.ancount)
-	binary.BigEndian.PutUint16(header[8:], h.nscount)
-	binary.BigEndian.PutUint16(header[10:], h.arcount)
-
-	return header
-}
-
-type QuestionSection struct {
-	label  LabelArray
-	qType  []byte
-	qClass []byte
-}
-
-func (q *QuestionSection) setDataToByteArray() []byte {
-
-	questionSection := make([]byte, q.length())
-
-	var label []byte
-	labelLength := 0
-
-	for _, labelPart := range q.label {
-
-		labelPartLength := len(labelPart)            // размер стринг
-		label = append(label, byte(labelPartLength)) // положить размер в 1 байт
-		labelLength += 1
-
-		label = append(label, []byte(labelPart)...) // сам лейбл
-		labelLength += labelPartLength
-	}
-	label = append(label, byte(0)) // добавить null byte
-	labelLength += 1
-
-	copy(questionSection[0:labelLength], label)
-
-	copy(questionSection[labelLength:labelLength+2], q.qType)
-
-	copy(questionSection[labelLength+2:], q.qClass)
-
-	return questionSection
-}
-func (q *QuestionSection) length() int {
-	// 1 байт под размер
-	// N байт под сам лейбл
-	// 1 байт под  null byte в конце
-	labelLength := 0
-	for _, labelPart := range q.label {
-		labelLength += 1              // 1 байт под размер
-		labelLength += len(labelPart) // сам лейбл
-	}
-	labelLength += 1 // null byte в конце
-	return labelLength + len(q.qType) + len(q.qClass)
-}
-
-type AnswerSection struct {
-	questionSection QuestionSection
-	ttl             uint32
-	rlength         uint16
-	rdata           []byte
-}
-
-func (a *AnswerSection) setDataToByteArray() []byte {
-	// allocate array of bytes
-	answerSection := make([]byte, a.length())
-	fmt.Println("размер выделенного массива под ответ: ", len(answerSection))
-
-	// write question section into answerSection
-	copy(answerSection[0:], a.questionSection.setDataToByteArray())
-	fmt.Println("первая часть в ответе question section: ", len(a.questionSection.setDataToByteArray()))
-	ttlLength := 4
-	ttlStartIndex := a.questionSection.length()
-	binary.BigEndian.PutUint32(answerSection[ttlStartIndex:], a.ttl)
-
-	rdlengthSize := 2
-	rdlengthStartIndex := ttlStartIndex + ttlLength
-	binary.BigEndian.PutUint16(answerSection[rdlengthStartIndex:], a.rlength)
-
-	rdataStartIndex := rdlengthStartIndex + rdlengthSize
-	copy(answerSection[rdataStartIndex:], a.rdata)
-
-	return answerSection
-}
-func (a *AnswerSection) length() int {
-	ttlSize := int(unsafe.Sizeof(a.ttl))          // TODO: 4
-	rdlengthSize := int(unsafe.Sizeof(a.rlength)) // TODO: 2
-	fmt.Println("a.questionSection.length()", a.questionSection.length())
-	fmt.Println("ttlSize", ttlSize)
-	fmt.Println("rdlengthSize", rdlengthSize)
-	fmt.Println("a.rdata", len(a.rdata))
-
-	return a.questionSection.length() + ttlSize + rdlengthSize + len(a.rdata)
-}
-
-//  response[0]=1234 >> 8; response[1]= 1234 & 0xFF;
-// 1234 - это число, наверно подефолту на 32 бита, нам нужно его записать в 16 бит, 2 байта, пишем сначала один байт (>>8), затем второй (& 0xFF - отбрасываем лишние байты)
-//  потому что 1234 - это 16 бит и ты делишь на 256 ( сдвиг на 8 битов)
-
-type LabelArray []string
