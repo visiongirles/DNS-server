@@ -100,10 +100,9 @@ func forwardDNSPacket(
 
 	forwardingAddress := os.Args[2]
 
-	answerBuf := make([]byte, 512)
-	headerSize := 12
-	bytesFromRead := 0
-	offset := 0
+	//headerSize := 12
+	//bytesFromRead := 0
+	//offset := 0
 
 	var pairs sync.Map
 
@@ -114,7 +113,7 @@ func forwardDNSPacket(
 
 	//answerSectionInBytes := []byte{}
 
-	for _, questionSection := range parsedRequest.questionSection {
+	for index, questionSection := range parsedRequest.questionSection {
 		wg.Add(1)
 
 		//questionSectionSize = append(questionSectionSize, questionSection.length())
@@ -129,34 +128,47 @@ func forwardDNSPacket(
 		fmt.Println("[FORWARD] Request for forward in bytes", request)
 
 		// Forward DNS Packet to forwarding server
-		bytes, answerSection, err2, b, done := forwardQuestionSection(
+		go forwardQuestionSection(
 			forwardingAddress,
 			request,
-			answerBuf,
-			offset,
-			answerSectionSize,
-			headerSize,
 			questionSection,
-			answerSectionInBytes,
+			&pairs,
+			index,
 		)
-		bytesFromRead += bytes
-		if done {
-			return err2, b
-		}
 	}
 
 	wg.Wait()
-	fmt.Println("ОТВЕТ от форвард в байтах: ", answerBuf[:bytesFromRead])
-	receivedData = answerBuf[:bytesFromRead]
+	//fmt.Println("ОТВЕТ от форвард в байтах: ", answerBuf[:bytesFromRead])
+	//receivedData = answerBuf[:bytesFromRead]
 
 	newHeader := setHeader(parsedRequest.header, int(parsedRequest.header.qdcount), int(parsedRequest.header.qdcount))
 	response := newHeader.setDataToByteArray()
 
-	for _, questionSection := range parsedRequest.questionSection {
-		response = append(response, questionSection.setDataToByteArray()...)
+	countDict := len(parsedRequest.questionSection)
+
+	for index := 0; index < countDict; index++ {
+
+		value, _ := pairs.Load(index)
+
+		if v, ok := value.(QSandASPair); ok {
+			response = append(response, v.qs...)
+		}
+
 	}
 
-	response = append(response, answerSectionInBytes...)
+	for index := 0; index < countDict; index++ {
+		value, _ := pairs.Load(index)
+
+		if v, ok := value.(QSandASPair); ok {
+			response = append(response, v.as...)
+		}
+	}
+
+	//for _, questionSection := range parsedRequest.questionSection {
+	//	response = append(response, questionSection.setDataToByteArray()...)
+	//}
+	//
+	//response = append(response, answerSectionInBytes...)
 	_, err = udpConn.WriteToUDP(response, source)
 	if err != nil {
 		fmt.Println("Failed to send response:", err)
@@ -168,38 +180,34 @@ func forwardDNSPacket(
 func forwardQuestionSection(
 	forwardingAddress string,
 	request []byte,
-	answerBuf []byte,
-	offset int,
-	answerSectionSize []int,
-	headerSize int,
 	questionSection QuestionSection,
-	answerSectionInBytes []byte) (int, []byte, error, bool, bool) {
+	pairs *sync.Map,
+	count int,
+) {
 	defer wg.Done()
+
+	answerBuf := make([]byte, 512)
 
 	updConnForward, err := net.Dial("udp", forwardingAddress)
 	if err != nil {
 		fmt.Printf("Some error %v", err)
-		return 0, nil, nil, true, true
+		os.Exit(1)
 	}
+	_, err = updConnForward.Write(request)
 
-	_, errWrite := updConnForward.Write(request)
-
-	if errWrite != nil {
+	if err != nil {
 		fmt.Printf("Some error %v", err)
-		return 0, nil, nil, true, true
+		os.Exit(1)
 	}
 
-	bytesRead, errRead := updConnForward.Read(answerBuf[offset:])
-	answerSectionSize = append(answerSectionSize, bytesRead-headerSize-questionSection.length())
-
-	answerSectionInBytes = append(answerSectionInBytes, answerBuf[len(request):]...)
-	if errRead != nil {
+	_, err = updConnForward.Read(answerBuf)
+	if err != nil {
 		fmt.Printf("Some error %v", err)
-		return 0, nil, nil, true, true
+		os.Exit(1)
 	}
+	pairs.Store(count, QSandASPair{questionSection.setDataToByteArray(), answerBuf[len(request):]})
 
-	offset += len(answerBuf)
-	return bytesRead, answerSectionInBytes, nil, false, false
+	//offset += len(answerBuf)
 }
 
 func setDNSResponse(parsedRequest Request) []byte {
